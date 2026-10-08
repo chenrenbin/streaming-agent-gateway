@@ -29,13 +29,22 @@ const paint = (s) => (hasColor ? s : s.replace(/\x1b\[[0-9;]*m/g, ''));
 
 function parseArgs(argv) {
   let url = 'http://localhost:3000';
+  let provider = 'mock';
+  let model = null;
+  let apiKey = null;
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--url') url = argv[++i];
+    else if (argv[i] === '--provider') provider = argv[++i];
+    else if (argv[i] === '--model') model = argv[++i];
+    else if (argv[i] === '--api-key') apiKey = argv[++i];
     else rest.push(argv[i]);
   }
   const prompt = rest.join(' ') || '请介绍一下你自己，并演示流式输出。';
-  return { url, prompt };
+  const modelCfg = { provider };
+  if (model) modelCfg.model = model;
+  if (apiKey) modelCfg.apiKey = apiKey;
+  return { url, prompt, modelCfg };
 }
 
 // 渲染单个事件：token 内联"打字"，结构事件单独成行
@@ -71,14 +80,16 @@ function render(ev) {
 }
 
 async function main() {
-  const { url, prompt } = parseArgs(process.argv.slice(2));
+  const { url, prompt, modelCfg } = parseArgs(process.argv.slice(2));
   const client = new GatewayClient(url);
 
   console.log(paint(c.cyan(`\n=== Streaming Agent Gateway · CLI 客户端 ===`)));
   console.log(paint(c.dim(`网关: ${url}`)));
   console.log(paint(c.dim(`提示词: ${prompt}`)));
+  if (modelCfg.provider !== 'mock')
+    console.log(paint(c.dim(`模型: ${modelCfg.provider}/${modelCfg.model ?? '(默认)'} ${modelCfg.apiKey ? '(含 API Key)' : '(用网关环境变量)'}`)));
 
-  const { run_id, status } = await client.createRun({ prompt });
+  const { run_id, status } = await client.createRun({ prompt, model: modelCfg });
   console.log(paint(c.ok(`\n▶ 已创建 Run: ${run_id} (status=${status})`)));
   console.log(paint(c.dim(`按键: c=取消 p=暂停 r=恢复 y=重试 x=断线重连 q=退出\n`)));
 

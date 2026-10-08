@@ -40,14 +40,13 @@ export class GatewayClient {
       `${this.base}/runs/${runId}/stream?since=${since}`,
       { headers: { 'Last-Event-ID': String(since) }, signal },
     );
-    const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = '';
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
+      // 用 for await 而非手动 reader.read()：规避 Node undici 偶发返回
+      // { done:false, value:undefined } 导致的崩溃，流式更稳健
+      for await (const chunk of res.body) {
+        buf += decoder.decode(chunk, { stream: true });
         const frames = buf.split('\n\n');
         buf = frames.pop();
         for (const f of frames) {

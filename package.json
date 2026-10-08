@@ -7,7 +7,8 @@
     "start": "node src/index.js",
     "demo": "node examples/demo.js",
     "web": "node examples/web-server.js",
-    "cli": "node examples/cli.js"
+    "cli": "node examples/cli.js",
+    "real": "node examples/real-models.js"
   },
   "engines": {
     "node": ">=22"

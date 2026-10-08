@@ -36,6 +36,12 @@
   button:hover { opacity: .88; }
   button:disabled { background: #3a4150; color: var(--muted); cursor: not-allowed; }
   button.ghost { background: var(--panel2); border: 1px solid var(--border); color: var(--text); }
+  select, input.ctl {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px; font-size: 14px;
+  }
+  input.ctl { min-width: 200px; }
+  label.ctl { color: var(--muted); font-size: 13px; display: inline-flex; gap: 6px; align-items: center; }
   .badge {
     display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px;
     font-weight: 600; border: 1px solid var(--border); color: var(--muted);
@@ -80,6 +86,26 @@
       <span id="conn" class="conn">未连接</span>
     </div>
     <textarea id="prompt" placeholder="输入提示词，例如：介绍一下你自己">请介绍一下你自己，并演示流式输出。</textarea>
+    <div class="row" style="margin-top:10px;">
+      <label class="ctl">模型
+        <select id="provider">
+          <option value="mock">Mock（默认）</option>
+          <option value="deepseek">DeepSeek</option>
+          <option value="qwen">通义千问</option>
+        </select>
+      </label>
+      <input id="apiKey" class="ctl" type="password" placeholder="API Key（留空用网关环境变量）" />
+      <input id="modelName" class="ctl" type="text" placeholder="模型名（可选）" />
+    </div>
+    <div class="row" style="margin-top:10px;">
+      <label class="ctl">延时(ms/字)
+        <input id="delayMs" class="ctl" type="number" value="60" min="0" max="2000" step="10" />
+      </label>
+      <label class="ctl">轮数(maxTurns)
+        <input id="maxTurns" class="ctl" type="number" value="3" min="1" max="20" step="1" />
+      </label>
+      <span class="hint">调大「延时」可在流式过程中点「取消 / 暂停」；设为多轮后暂停，再点「恢复」续跑。</span>
+    </div>
     <div class="row" style="margin-top:10px;">
       <button id="btnNew">▶ 新建 Run</button>
       <button id="btnCancel" class="ghost" disabled>取消</button>
@@ -182,7 +208,11 @@ function handleEvent(ev) {
       break;
     case 'run_started': els.chat.textContent = ''; break;
     case 'paused':
-      if (ev.data.reason === 'await_retry') setStatus('waiting_client'); else setStatus('paused');
+      if (ev.data.reason === 'await_retry') setStatus('waiting_client');
+      else {
+        setStatus('paused');
+        els.chat.appendChild(document.createTextNode('\n⏸ 已暂停（点「恢复」从 checkpoint 续跑）'));
+      }
       break;
     case 'resumed': setStatus('running'); break;
     case 'run_finished': setStatus('finished'); els.es && els.es.close(); break;
@@ -200,10 +230,18 @@ function handleEvent(ev) {
 async function createRun() {
   if (state.es) state.es.close();
   const prompt = els.prompt.value || '请介绍一下你自己。';
+  const provider = document.getElementById('provider').value;
+  const modelCfg = { provider };
+  const ak = document.getElementById('apiKey').value.trim();
+  if (ak) modelCfg.apiKey = ak;
+  const mn = document.getElementById('modelName').value.trim();
+  if (mn) modelCfg.model = mn;
+  const delayMs = parseInt(document.getElementById('delayMs').value, 10) || 60;
+  const maxTurns = parseInt(document.getElementById('maxTurns').value, 10) || 1;
   const res = await fetch('/runs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt }),
+    body: JSON.stringify({ prompt, model: modelCfg, streamDelayMs: delayMs, maxTurns }),
   });
   const { run_id } = await res.json();
   state.runId = run_id; els.runId.textContent = run_id;

@@ -7,9 +7,16 @@
 import { RunEventType } from './events.js';
 
 // provider 原生 chunk → 统一 Harness chunk
+// 兼容两种输入：
+//  - Mock 产出字符串 → 直接当作 token delta
+//  - 真实 OpenAI 兼容产出对象 { choices:[{delta:{content}, finish_reason}], usage? }
 export function adaptModelChunk(chunk) {
-  // 真实场景：不同模型返回 {choices:[{delta:{content}}]} 等，这里归一化
-  return { kind: 'token', delta: chunk };
+  if (typeof chunk === 'string') return { kind: 'token', delta: chunk };
+  const choice = chunk?.choices?.[0];
+  if (choice?.delta?.content) return { kind: 'token', delta: choice.delta.content };
+  if (choice?.finish_reason) return { kind: 'finish', reason: choice.finish_reason };
+  if (chunk?.usage) return { kind: 'usage', usage: chunk.usage }; // 真实 token 用量
+  return { kind: 'ignore' };
 }
 
 export function adaptToolResult(name, args, result) {

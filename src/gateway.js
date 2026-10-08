@@ -17,7 +17,7 @@ import path from 'node:path';
 import { bus } from './bus.js';
 import { RunStore } from './store.js';
 import { AgentLoop, TERMINAL } from './loop.js';
-import { MockStreamingModel, MockTool, CancellationToken } from './model.js';
+import { MockStreamingModel, MockTool, OpenAICompatibleModel, CancellationToken } from './model.js';
 import { RunStatus, toSSE } from './events.js';
 
 const DEFAULT_TEXT =
@@ -31,14 +31,45 @@ export function createGateway({ store, port = 3000, staticRoot = null } = {}) {
 
   function getLoop(runId, config = {}) {
     if (!loops.has(runId)) {
-      const model = new MockStreamingModel(config.prompt ?? DEFAULT_TEXT, {
-        delayMs: config.streamDelayMs ?? 8,
-      });
-      const tool = new MockTool('demo_tool', {
-        failMode: config.toolFailMode ?? 'never',
-        sideEffecting: false,
-      });
-      loops.set(runId, new AgentLoop(store, model, { maxTurns: 1, tool }));
+      const mcfg = config.model ?? {};
+      const provider = mcfg.provider ?? 'mock';
+      let model;
+      let tool = null;
+      if (provider === 'mock') {
+        model = new MockStreamingModel(config.prompt ?? DEFAULT_TEXT, {
+          delayMs: config.streamDelayMs ?? 8,
+        });
+        tool = new MockTool('demo_tool', {
+          failMode: config.toolFailMode ?? 'never',
+          sideEffecting: false,
+        });
+      } else {
+        // 真实模型：DeepSeek / 通义千问（OpenAI 兼容协议）
+        const presets = {
+          deepseek: { baseURL: 'https://api.deepseek.com', model: 'deepseek-chat' },
+          qwen: {
+            baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            model: 'qwen-plus',
+          },
+        };
+        const p = presets[provider];
+        if (!p) throw new Error(`unknown model provider: ${provider}`);
+        const envKey =
+          provider === 'deepseek'
+            ? process.env.DEEPSEEK_API_KEY
+            : process.env.DASHSCOPE_API_KEY;
+        model = new OpenAICompatibleModel({
+          baseURL: mcfg.baseURL ?? p.baseURL,
+          apiKey: mcfg.apiKey ?? envKey ?? '',
+          model: mcfg.model ?? p.model,
+          temperature: mcfg.temperature,
+        });
+        // 真实模型不附带 mock 工具（避免构造非法 messages；incident/retry 由 mock 演示覆盖）
+      }
+      loops.set(runId, new AgentLoop(store, model, {
+        maxTurns: config.maxTurns ?? 1,
+        tool,
+      }));
     }
     return loops.get(runId);
   }
@@ -128,6 +159,20 @@ export function createGateway({ store, port = 3000, staticRoot = null } = {}) {
           sendJSON(res, 200, { accepted: true });
           return;
         }
+      }
+
+      // 临时调试：列出某 run 的所有事件类型
+      if (req.method === 'GET' && parts[0] === 'debug' && parts.length === 2) {
+        const evs = store.getEventsSince(parts[1], 0);
+        sendJSON(res, 200, { types: evs.map((e) => e.type) });
+        return;
+      }
+
+      // 临时调试：列出某 run 的所有事件类型
+      if (req.method === 'GET' && parts[0] === 'debug' && parts.length === 2) {
+        const evs = store.getEventsSince(parts[1], 0);
+        sendJSON(res, 200, { types: evs.map((e) => e.type) });
+        return;
       }
 
       sendJSON(res, 404, { error: 'not found' });

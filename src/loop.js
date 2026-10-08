@@ -53,6 +53,10 @@ export class AgentLoop {
 
   // 从 checkpoint 恢复（Option Y）：加载最新快照 + 续 seq 真执行，绝不重跑已完成的轮次
   async resume(runId, token) {
+    // 清除暂停标志：恢复即代表"已接受暂停、继续"，避免 resume 后在边界被再次暂停
+    token.pauseRequested = false;
+    // 替换新的（未中止的）signal：pause 不会 abort，但 cancel 会；恢复后需一个干净信号供后续流式/取消使用
+    token.resetSignal();
     const cp = this.store.getLatestCheckpoint(runId);
     if (!cp) throw new Error('no checkpoint to resume from');
     const messages = structuredClone(cp.messages);
@@ -91,6 +95,7 @@ export class AgentLoop {
         const turnStart = Date.now();
         let firstTokenTs = null;
         let fullText = '';
+        let usageInfo = null; // 真实模型在末块回传的 token 用量
         try {
           for await (const chunk of this.model.stream(messages, token.signal)) {
             if (token.requested) break; // 收到取消 → 停止收集 token
@@ -99,6 +104,8 @@ export class AgentLoop {
               if (firstTokenTs == null) firstTokenTs = Date.now();
               fullText += adapted.delta;
               this._emit(runId, RunEventType.TOKEN, { delta: adapted.delta }, span);
+            } else if (adapted.kind === 'usage') {
+              usageInfo = adapted.usage; // prompt/completion/total tokens
             }
           }
         } catch (err) {
@@ -125,11 +132,19 @@ export class AgentLoop {
         this._emit(runId, RunEventType.MESSAGE_COMPLETE, { text: fullText }, span);
         messages.push({ role: 'assistant', content: fullText });
 
-        // 审计：usage（含 TTFT）
+        // 审计：usage（含 TTFT + 真实 token 用量）
+        const llmTokens = usageInfo
+          ? {
+              prompt: usageInfo.prompt_tokens,
+              completion: usageInfo.completion_tokens,
+              total: usageInfo.total_tokens,
+            }
+          : undefined;
         this._emit(runId, RunEventType.USAGE, {
           ttft_ms: ttft,
           tokens: fullText.length,
           turn: iteration,
+          llm_tokens: llmTokens,
         }, span);
         this.store.appendAudit({
           run_id: runId,
@@ -137,6 +152,7 @@ export class AgentLoop {
           ttft_ms: ttft,
           tokens: fullText.length,
           turn: iteration,
+          llm_tokens: llmTokens,
         });
 
         // 可选工具步骤（演示 incident / retry）

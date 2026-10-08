@@ -18,6 +18,10 @@ npm run cli    # 启动交互式命令行客户端（默认连 :3000）
 - **事件流（server→client）**：`EventSource('/runs/:id/stream')`。事件带 `id=seq`，**浏览器断线自动带 `Last-Event-ID` 重连**，服务端按 seq 纯补发缺失事件（Replay，不重执行）。
 - **命令（client→server）**：独立 `POST` 端点（创建/取消/暂停/恢复/重试），与事件流**双通道**分离。
 - 界面：流式打字渲染、`message_complete` 作为最终真相覆盖、TTFT/tokens 统计、实时事件日志、状态徽章与按钮按状态联动（`waiting_client` 时启用"重试"）。
+- **控制面板新增「延时(ms/字)」与「轮数(maxTurns)」**：Mock 默认 8ms/字、单轮，跑得太快来不及点按钮。Web 端默认 **60ms/字 + 3 轮**，把流式放慢并制造轮次边界，方便演示：
+  - **取消**：流式进行中点「取消」→ `AbortSignal` 真·掐断在途流 → `run_terminated`。
+  - **暂停**：流式进行中点「暂停」→ 在当前轮次边界优雅停止（状态 `paused`，对话区显示 ⏸），多轮时才有边界可停。
+  - **恢复**：暂停后点「恢复」→ 从最新 checkpoint 续跑（**不会重跑已完成的轮次**，恢复后正常流式）。
 
 ```bash
 npm run web          # 然后浏览器打开 http://localhost:8080
@@ -45,6 +49,39 @@ npm run cli --url http://localhost:8080 "提示词"  # 指定网关与提示词
 
 > 非 TTY 环境（管道/CI）下自动降级为"创建 Run → 流式到结束即退出"，仍可验证全链路。
 
+## 接真实模型（DeepSeek / 通义千问）
+
+两者都提供 **OpenAI 兼容**的流式 `/chat/completions` 接口，所以只需一个 `OpenAICompatibleModel` 适配器（见 `src/model.js`），切换 `baseURL` / `model` / `apiKey` 即可，**网关其余管道（事件、取消、checkpoint、审计、失败协议）完全复用**。
+
+### 预设与鉴权
+
+| provider | baseURL | 默认模型 | 环境变量（网关侧兜底） |
+|---|---|---|---|
+| `deepseek` | `https://api.deepseek.com` | `deepseek-chat` | `DEEPSEEK_API_KEY` |
+| `qwen` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` | `DASHSCOPE_API_KEY` |
+
+> Key 可经三种方式传入，优先级：客户端显式 `apiKey` > 网关进程环境变量 > 空（将触发 `incident → run_failed`，用于演示失败协议）。
+
+### 用法
+
+```bash
+# 方式一：专用示例（经网关跑真实流式；缺 Key 时演示失败协议路径）
+export DEEPSEEK_API_KEY=sk-xxx && npm run real -- deepseek
+export DASHSCOPE_API_KEY=sk-xxx && npm run real -- qwen
+
+# 方式二：CLI（--provider / --model / --api-key）
+npm run cli -- --provider deepseek --api-key sk-xxx "用一句话介绍你自己"
+
+# 方式三：Web（控制面板选模型 + 填 API Key，留空则用网关环境变量）
+npm run web   # 打开 http://localhost:8080
+```
+
+### 适配层要点（呼应审查"转换统一 Harness Event"）
+
+- `OpenAICompatibleModel.stream()` 用 `fetch` 调流式接口，并把 `CancellationToken.signal` 透传为 `fetch` 的 `signal` —— **取消即真·掐断在途流**，与原"混合取消"一致。
+- 模型产出的原生 chunk（JSON，`choices[].delta.content`）由 `adapter.adaptModelChunk()` 归一化成统一 Harness Event；末块的 `usage` 被提取进 `usage` 事件的 `llm_tokens`（真实 prompt/completion/total 用量，供审计）。
+- 真实模型不走 Mock 工具步骤（避免构造非法 `messages`；`incident`/`retry` 仍由 Mock 演示覆盖）。
+
 ## 验收清单（对应你提的 5 条需求）
 
 | 需求 | 是否覆盖 | 落点 |
@@ -67,7 +104,7 @@ src/
   events.js     RunEvent 统一信封 + 受控枚举 + SSE 编码
   store.js      RunStore：runs / run_events / run_checkpoints + 审计 hash 链（内存）
   bus.js        进程内 pub/sub（事件实时推送给 SSE）
-  model.js      StreamingModel 抽象 + Mock 流式模型 + 可取消工具 + CancellationToken
+  model.js      StreamingModel 抽象 + Mock 流式模型 + OpenAICompatibleModel(真实模型) + 可取消工具 + CancellationToken
   adapter.js    Harness 转换层（原生→统一事件、异常→incident）
   loop.js       Agent Loop：混合取消 / checkpoint / Option Y 恢复 / TTFT / incident-retry
   gateway.js    HTTP 网关：SSE 推送 + 命令通道（双通道）
@@ -77,6 +114,7 @@ examples/
   demo.js         四个场景：常规流式 / 取消 / 断线重连补发 / incident+retry
   cli.js          交互式命令行客户端（fetch 流式 + 手动游标重连）
   web-server.js   托管 Web 客户端静态页 + 网关（共用端口）
+  real-models.js  接真实模型示例（DeepSeek / 通义千问，缺 Key 演示失败协议）
 public/
   index.html      零依赖 Web 客户端（原生 EventSource + 命令 POST）
 ```
