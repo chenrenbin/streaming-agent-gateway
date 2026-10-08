@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Streaming Agent Gateway · Web 客户端</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1f232c; --border: #2a2f3a;
+    --text: #e6e9ef; --muted: #8b93a3; --accent: #4f9cff; --accent2: #34d399;
+    --warn: #fbbf24; --crit: #f87171; --green: #34d399; --red: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Microsoft YaHei", sans-serif; line-height: 1.5;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 24px 20px 60px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px; margin-bottom: 16px;
+  }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  textarea {
+    width: 100%; min-height: 64px; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px; resize: vertical;
+    font-size: 14px;
+  }
+  button {
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+    padding: 9px 14px; font-size: 14px; cursor: pointer; transition: opacity .15s;
+  }
+  button:hover { opacity: .88; }
+  button:disabled { background: #3a4150; color: var(--muted); cursor: not-allowed; }
+  button.ghost { background: var(--panel2); border: 1px solid var(--border); color: var(--text); }
+  .badge {
+    display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px;
+    font-weight: 600; border: 1px solid var(--border); color: var(--muted);
+  }
+  .badge.running { color: var(--accent); border-color: var(--accent); }
+  .badge.paused, .badge.waiting_client { color: var(--warn); border-color: var(--warn); }
+  .badge.finished { color: var(--green); border-color: var(--green); }
+  .badge.terminated, .badge.failed { color: var(--red); border-color: var(--red); }
+  #chat { white-space: pre-wrap; word-break: break-word; font-size: 15px; min-height: 24px; }
+  #chat .meta { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  #events {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px; max-height: 320px; overflow: auto; background: var(--panel2);
+    border-radius: 8px; padding: 10px; border: 1px solid var(--border);
+  }
+  .ev { padding: 2px 0; border-bottom: 1px dashed #232833; }
+  .ev:last-child { border-bottom: 0; }
+  .ev .t { color: var(--accent); }
+  .ev .seq { color: var(--muted); }
+  .ev.incident { color: var(--warn); }
+  .ev.terminal { color: var(--crit); }
+  .ev.tool { color: var(--green); }
+  .stats { display: flex; gap: 18px; margin-top: 10px; color: var(--muted); font-size: 13px; }
+  .stats b { color: var(--text); }
+  .conn { font-size: 12px; color: var(--muted); margin-left: auto; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Streaming Agent Gateway · Web 客户端</h1>
+  <div class="sub">
+    浏览器原生 <code>EventSource</code> 单向订阅事件流（server→client）；命令走独立 POST 端点（client→server），
+    断线时浏览器自动带 <code>Last-Event-ID</code> 重连并按 seq 补发（Replay，不重执行）。
+  </div>
+
+  <div class="card">
+    <div class="row" style="margin-bottom:10px;">
+      <strong>控制面板</strong>
+      <span id="status" class="badge">idle</span>
+      <span id="conn" class="conn">未连接</span>
+    </div>
+    <textarea id="prompt" placeholder="输入提示词，例如：介绍一下你自己">请介绍一下你自己，并演示流式输出。</textarea>
+    <div class="row" style="margin-top:10px;">
+      <button id="btnNew">▶ 新建 Run</button>
+      <button id="btnCancel" class="ghost" disabled>取消</button>
+      <button id="btnPause" class="ghost" disabled>暂停</button>
+      <button id="btnResume" class="ghost" disabled>恢复</button>
+      <button id="btnRetry" class="ghost" disabled>重试</button>
+      <span class="hint">run_id: <code id="runId">—</code></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <strong>对话</strong>
+    <div id="chat" style="margin-top:10px;"></div>
+    <div class="stats">
+      <span>TTFT: <b id="ttft">—</b></span>
+      <span>tokens: <b id="tokens">0</b></span>
+      <span>已渲染 seq: <b id="seq">0</b></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <strong>事件流（Harness Event 实时日志）</strong>
+    <div id="events" style="margin-top:10px;"></div>
+  </div>
+</div>
+
+<script>
+// ── 与共享 SDK 一致的事件类型集合 ──
+const EVT_TYPES = [
+  'run_started','run_finished','run_terminated','run_failed',
+  'paused','resumed','turn_start','turn_end',
+  'token','message_complete','tool_call_start','tool_call_end','tool_result',
+  'checkpoint','usage','error','audit','incident'
+];
+const TERMINAL = new Set(['run_finished','run_terminated','run_failed']);
+
+const $ = (id) => document.getElementById(id);
+const els = {
+  prompt: $('prompt'), chat: $('chat'), events: $('events'),
+  status: $('status'), conn: $('conn'), runId: $('runId'),
+  ttft: $('ttft'), tokens: $('tokens'), seq: $('seq'),
+  btnNew: $('btnNew'), btnCancel: $('btnCancel'), btnPause: $('btnPause'),
+  btnResume: $('btnResume'), btnRetry: $('btnRetry'),
+};
+
+let state = { runId: null, status: 'idle', lastSeq: 0, es: null, tokens: 0, ttft: null };
+
+function setStatus(s) {
+  state.status = s;
+  els.status.textContent = s;
+  els.status.className = 'badge ' + s;
+  // 按钮可用性随状态联动
+  els.btnCancel.disabled = !['running'].includes(s);
+  els.btnPause.disabled = !['running'].includes(s);
+  els.btnResume.disabled = !['paused','crashed'].includes(s);
+  els.btnRetry.disabled = s !== 'waiting_client';
+}
+function resetView() {
+  els.chat.textContent = '';
+  els.events.innerHTML = '';
+  state.lastSeq = 0; state.tokens = 0; state.ttft = null;
+  els.tokens.textContent = '0'; els.seq.textContent = '0'; els.ttft.textContent = '—';
+}
+
+function logEvent(ev) {
+  const div = document.createElement('div');
+  div.className = 'ev' + (ev.type === 'incident' ? ' incident'
+    : TERMINAL.has(ev.type) ? ' terminal' : /tool/.test(ev.type) ? ' tool' : '');
+  let summary = '';
+  if (ev.type === 'token') summary = `δ "${ev.data.delta}"`;
+  else if (ev.type === 'message_complete') summary = `len=${ev.data.text.length}`;
+  else if (ev.type === 'usage') summary = `ttft=${ev.data.ttft_ms}ms, tokens=${ev.data.tokens}`;
+  else if (ev.type === 'tool_call_start') summary = ev.data.name;
+  else if (ev.type === 'tool_result') summary = ev.data.result;
+  else if (ev.type === 'tool_call_end') summary = ev.data.status;
+  else if (ev.type === 'incident') summary = `${ev.data.category} retryable=${ev.data.retryable} remediation=${ev.data.remediation}`;
+  else if (ev.type === 'checkpoint') summary = 'snapshot upsert';
+  else summary = JSON.stringify(ev.data).slice(0, 80);
+  div.innerHTML = `<span class="seq">#${ev.seq}</span> <span class="t">${ev.type}</span> ${summary}`;
+  els.events.appendChild(div);
+  els.events.scrollTop = els.events.scrollHeight;
+}
+
+// 处理单个事件（含按 seq 去重，防御重连时可能的重叠补发）
+function handleEvent(ev) {
+  if (ev.seq <= state.lastSeq) return; // 已渲染过
+  state.lastSeq = ev.seq;
+  els.seq.textContent = ev.seq;
+
+  switch (ev.type) {
+    case 'token':
+      els.chat.appendChild(document.createTextNode(ev.data.delta));
+      state.tokens++; els.tokens.textContent = state.tokens;
+      break;
+    case 'message_complete':
+      els.chat.textContent = ev.data.text; // 最终真相：用 message_complete 覆盖
+      break;
+    case 'usage':
+      state.ttft = ev.data.ttft_ms; els.ttft.textContent = ev.data.ttft_ms + 'ms';
+      break;
+    case 'run_started': els.chat.textContent = ''; break;
+    case 'paused':
+      if (ev.data.reason === 'await_retry') setStatus('waiting_client'); else setStatus('paused');
+      break;
+    case 'resumed': setStatus('running'); break;
+    case 'run_finished': setStatus('finished'); els.es && els.es.close(); break;
+    case 'run_terminated': setStatus('terminated'); els.es && els.es.close(); break;
+    case 'run_failed': setStatus('failed'); els.es && els.es.close(); break;
+    case 'incident':
+      // remediation=retry → 等待客户端决策（Retry 按钮已可用）
+      if (ev.data.remediation === 'retry' && ev.data.retryable) setStatus('waiting_client');
+      break;
+  }
+  logEvent(ev);
+}
+
+// ── 创建 Run（命令通道：POST /runs）──
+async function createRun() {
+  if (state.es) state.es.close();
+  const prompt = els.prompt.value || '请介绍一下你自己。';
+  const res = await fetch('/runs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt }),
+  });
+  const { run_id } = await res.json();
+  state.runId = run_id; els.runId.textContent = run_id;
+  resetView(); setStatus('running');
+  connect(run_id);
+}
+
+// ── 订阅事件流（浏览器原生 EventSource，断线自动按 Last-Event-ID 重连）──
+function connect(runId) {
+  if (state.es) state.es.close();
+  setConn('连接中…');
+  const es = new EventSource(`/runs/${runId}/stream`);
+  state.es = es;
+  es.onopen = () => setConn('● 已连接');
+  es.onerror = () => setConn('⟳ 重连中（浏览器自动按 Last-Event-ID 补发）');
+  for (const t of EVT_TYPES) {
+    es.addEventListener(t, (e) => { try { handleEvent(JSON.parse(e.data)); } catch {} });
+  }
+}
+function setConn(t) { els.conn.textContent = t; }
+
+// ── 命令按钮（独立 POST 端点）──
+async function command(action) {
+  if (!state.runId) return;
+  await fetch(`/runs/${state.runId}/${action}`, { method: 'POST' });
+}
+els.btnNew.onclick = createRun;
+els.btnCancel.onclick = () => command('cancel');
+els.btnPause.onclick = () => command('pause');
+els.btnResume.onclick = () => command('resume');
+els.btnRetry.onclick = () => command('retry');
+
+setStatus('idle');
+</script>
+</body>
+</html>
